@@ -1,5 +1,6 @@
 package com.example.demo.service;
 
+import com.example.demo.exception.ConflictException;
 import com.example.demo.model.User;
 import com.example.demo.repository.UserRepository;
 import com.example.demo.util.Check;
@@ -49,8 +50,12 @@ public class UserService {
         in.role = Patch.of(in.role, User.STUDENT);
         in.status = Patch.of(in.status, User.ACTIVE);
         Check.require(Check.notBlank(in.username), "username is required");
-        Check.require(!repository.existsByUsername(in.username), "username is already taken");
-        Check.require(in.email == null || !repository.existsByEmail(in.email), "email is already taken");
+        if (repository.existsByUsername(in.username)) {
+            throw new ConflictException("username is already taken");
+        }
+        if (in.email != null && repository.existsByEmail(in.email)) {
+            throw new ConflictException("email is already taken");
+        }
         Check.require(ROLES.contains(in.role) && STATUSES.contains(in.status), "invalid role or status");
         Check.require(in.password != null && in.password.length() >= 8
                         && in.password.matches(".*[A-Za-z].*") && in.password.matches(".*\\d.*"),

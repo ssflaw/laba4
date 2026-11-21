@@ -1,78 +1,184 @@
 @host = http://localhost:8080
 # Пользователи из db/02-data.sql (пароль у всех Password1):
 #   alice (1), bob (2) — STUDENT; carol (3) — STUDENT, BLOCKED; teacher (4) — TEACHER
-# Изменяющие запросы требуют заголовок X-XSRF-TOKEN и cookie XSRF-TOKEN (клиент хранит её сам).
+# Аутентификация — JWT: POST /auth/login | /auth/register | /auth/refresh возвращают
+# {"accessToken", "refreshToken"}; access передаётся в заголовке Authorization: Bearer, refresh — в JSON-теле.
+# Статус refresh-сессии в БД можно посмотреть (TEACHER) через POST /api/sessions/lookup {"refreshToken"}.
 
-### 0. CSRF: получить токен (без аутентификации)
-GET {{host}}/api/auth/csrf
-
-> {% client.global.set("csrf", response.body.token); %}
-
-### 1. ОШИБКА 403: изменяющий запрос без CSRF-токена
-POST {{host}}/api/auth/register
+### J1. Вход преподавателя → 200, пара токенов; в БД первая сессия ACTIVE
+POST {{host}}/auth/login
 Content-Type: application/json
 
-{"username": "dave", "password": "Secret123"}
+{"username": "teacher", "password": "Password1", "deviceId": "http-client"}
 
-### 2. ОШИБКА 400: слабый пароль
-POST {{host}}/api/auth/register
+> {% client.global.set("teacherAccess", response.body.accessToken); client.global.set("teacherRefresh1", response.body.refreshToken); %}
+
+### J1a. Сессия после входа — ACTIVE
+POST {{host}}/api/sessions/lookup
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+### J2. Защищённый endpoint с access → 200
+GET {{host}}/api/auth/me
+Authorization: Bearer {{teacherAccess}}
+
+### J3. ОШИБКА 401: без токена
+GET {{host}}/api/exams
+
+### J4. ОШИБКА 401: неверный access
+GET {{host}}/api/exams
+Authorization: Bearer not.a.jwt
+
+### J5. ОШИБКА 401: refresh вместо access в Bearer
+GET {{host}}/api/auth/me
+Authorization: Bearer {{teacherRefresh1}}
+
+### J6. Обновление пары → 200, новая пара (access не нужен)
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+> {% client.global.set("teacherAccess", response.body.accessToken); client.global.set("teacherRefresh2", response.body.refreshToken); %}
+
+### J6a. Старая сессия — USED
+POST {{host}}/api/sessions/lookup
+Authorization: Bearer {{teacherAccess}}
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+### J6b. Новая сессия — ACTIVE, тот же deviceId
+POST {{host}}/api/sessions/lookup
+Authorization: Bearer {{teacherAccess}}
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh2}}"}
+
+### J7. ОШИБКА 401: повторный refresh уже использованного токена (сессия → REVOKED)
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+### J7a. Использованная сессия — REVOKED
+POST {{host}}/api/sessions/lookup
+Authorization: Bearer {{teacherAccess}}
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+### J8. ОШИБКА 401: отозванный refresh
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{teacherRefresh1}}"}
+
+### J9. ОШИБКА 401: access вместо refresh
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{teacherAccess}}"}
+
+### J10. ОШИБКА 401: неверный refresh
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "not.a.jwt"}
+
+### J11. ОШИБКА 400: refresh без поля
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{}
+
+### J12. ОШИБКА 401: неверный пароль
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "teacher", "password": "wrong"}
+
+### J13. ОШИБКА 400: нет пароля
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "teacher"}
+
+### J14. ОШИБКА 401: заблокированный пользователь
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "carol", "password": "Password1"}
+
+### J15. Вход bob (нужен ниже)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "bob", "password": "Password1"}
+
+> {% client.global.set("bobAccess", response.body.accessToken); %}
+
+### J16. Вход alice (нужен ниже)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "alice", "password": "Password1"}
+
+> {% client.global.set("aliceAccess", response.body.accessToken); %}
+
+### 1. ОШИБКА 400: слабый пароль
+POST {{host}}/auth/register
+Content-Type: application/json
 
 {"username": "dave", "password": "123"}
 
-### 3. Регистрация (попытка получить роль TEACHER игнорируется → STUDENT)
-POST {{host}}/api/auth/register
+### 2. Регистрация → 201 и пара токенов (попытка получить роль TEACHER игнорируется → STUDENT)
+POST {{host}}/auth/register
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
-{"username": "dave", "email": "dave@example.com", "password": "Secret123", "role": "TEACHER", "status": "ACTIVE"}
+{"username": "dave", "email": "dave@example.com", "password": "Secret123", "role": "TEACHER", "status": "ACTIVE", "deviceId": "dave-phone"}
 
-> {% client.global.set("daveId", response.body.id); %}
+> {% client.global.set("daveAccess", response.body.accessToken); client.global.set("daveRefresh", response.body.refreshToken); %}
 
-### 4. ОШИБКА 400: такой username уже занят
-POST {{host}}/api/auth/register
+### 3. ОШИБКА 409: такой username уже занят
+POST {{host}}/auth/register
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"username": "alice", "password": "Secret123"}
 
-### 5. Кто я
+### 4. ОШИБКА 400: нет username
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{"password": "Secret123"}
+
+### 5. Кто я (role = STUDENT)
 GET {{host}}/api/auth/me
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 
-### 6. ОШИБКА 401: без аутентификации
-GET {{host}}/api/exams
-
-### 7. ОШИБКА 401: неверный пароль
-GET {{host}}/api/exams
-Authorization: Basic dave wrong
-
-### 8. ОШИБКА 401: заблокированный пользователь
-GET {{host}}/api/exams
-Authorization: Basic carol Password1
+> {% client.global.set("daveId", response.body.id); %}
 
 ### 9. ОШИБКА 403: студент не может создавать экзамены
 POST {{host}}/api/exams
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"title": "Hack", "passingScore": 0, "timeLimitMinutes": 10}
 
 ### 10. ОШИБКА 403: студент не видит список пользователей
 GET {{host}}/api/users
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 
 ### 11. Преподаватель: список пользователей
 GET {{host}}/api/users
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 
 ### 12. Преподаватель: создать экзамен (DRAFT)
 POST {{host}}/api/exams
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"title": "Spring Basics", "passingScore": 3, "timeLimitMinutes": 30}
 
@@ -80,14 +186,12 @@ X-XSRF-TOKEN: {{csrf}}
 
 ### 13. ОШИБКА 400: опубликовать экзамен без заданий
 POST {{host}}/api/exams/{{examId}}/publish
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ### 14. Преподаватель: задание 1
 POST {{host}}/api/exam-tasks
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "condition": "Аннотация для REST-контроллера?", "referenceAnswer": "@RestController", "maxScore": 2}
 
@@ -95,9 +199,8 @@ X-XSRF-TOKEN: {{csrf}}
 
 ### 15. Преподаватель: задание 2
 POST {{host}}/api/exam-tasks
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "condition": "HTTP-метод для частичного обновления?", "referenceAnswer": "PATCH", "maxScore": 3}
 
@@ -105,42 +208,37 @@ X-XSRF-TOKEN: {{csrf}}
 
 ### 16. Преподаватель: опубликовать экзамен
 POST {{host}}/api/exams/{{examId}}/publish
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ### 17. ОШИБКА 400: менять задания опубликованного экзамена нельзя
 PATCH {{host}}/api/exam-tasks/{{task1}}
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"maxScore": 10}
 
 ### 18. Студент: задания экзамена (эталонные ответы не отдаются)
 GET {{host}}/api/exam-tasks
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 
 ### 19. ОШИБКА 403: студент начинает попытку за другого студента (bob)
 POST {{host}}/api/exam-attempts
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "studentId": 2}
 
 ### 20. ОШИБКА 403: преподаватель не проходит экзамены
 POST {{host}}/api/exam-attempts
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "studentId": 4}
 
 ### 21. Студент: начать свою попытку
 POST {{host}}/api/exam-attempts
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "studentId": {{daveId}}}
 
@@ -148,33 +246,29 @@ X-XSRF-TOKEN: {{csrf}}
 
 ### 22. ОШИБКА 400: вторая активная попытка
 POST {{host}}/api/exam-attempts
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "studentId": {{daveId}}}
 
 ### 23. ОШИБКА 403: чужой студент отвечает в попытке dave
 POST {{host}}/api/exam-attempts/{{attemptId}}/answers
-Authorization: Basic bob Password1
+Authorization: Bearer {{bobAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"taskId": {{task1}}, "answer": "@RestController"}
 
 ### 24. Студент: ответ на задание 1 (верный)
 POST {{host}}/api/exam-attempts/{{attemptId}}/answers
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"taskId": {{task1}}, "answer": "@RestController"}
 
 ### 25. Студент: ответ на задание 2 (неверный)
 POST {{host}}/api/exam-attempts/{{attemptId}}/answers
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"taskId": {{task2}}, "answer": "PUT"}
 
@@ -182,95 +276,95 @@ X-XSRF-TOKEN: {{csrf}}
 
 ### 26. ОШИБКА 400: задание из другого экзамена
 POST {{host}}/api/exam-attempts/{{attemptId}}/answers
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"taskId": 1, "answer": "extends"}
 
 ### 27. Студент: исправить свой ответ (баллы пересчитываются)
 PATCH {{host}}/api/task-solutions/{{solutionId}}
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"answer": "patch"}
 
 ### 28. ОШИБКА 403: студент смотрит чужую попытку (попытка bob из начальных данных)
 GET {{host}}/api/exam-attempts/1
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 
 ### 29. ОШИБКА 400: архивировать экзамен с активной попыткой
 POST {{host}}/api/exams/{{examId}}/archive
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ### 30. Студент: завершить попытку (PASSED, 5 из 5)
 POST {{host}}/api/exam-attempts/{{attemptId}}/finish
-Authorization: Basic dave Secret123
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{daveAccess}}
 
 ### 31. ОШИБКА 400: удалить решение завершённой попытки
 DELETE {{host}}/api/task-solutions/{{solutionId}}
-Authorization: Basic dave Secret123
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{daveAccess}}
 
 ### 32. Студент: своя попытка
 GET {{host}}/api/exam-attempts/{{attemptId}}
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
 
 ### 33. Преподаватель: все попытки и решения
 GET {{host}}/api/exam-attempts
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 
 ### 34. Преподаватель: архивировать экзамен
 POST {{host}}/api/exams/{{examId}}/archive
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ### 35. ОШИБКА 400: начать попытку по архивному экзамену
 POST {{host}}/api/exam-attempts
-Authorization: Basic alice Password1
+Authorization: Bearer {{aliceAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"examId": {{examId}}, "studentId": 1}
 
 ### 36. ОШИБКА 404: несуществующий экзамен
 GET {{host}}/api/exams/999
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 
 ### 37. ОШИБКА 409: username должен быть уникальным
 PATCH {{host}}/api/users/{{daveId}}
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"username": "alice"}
 
 ### 38. Преподаватель: заблокировать dave
 PATCH {{host}}/api/users/{{daveId}}
-Authorization: Basic teacher Password1
+Authorization: Bearer {{teacherAccess}}
 Content-Type: application/json
-X-XSRF-TOKEN: {{csrf}}
 
 {"status": "BLOCKED"}
 
-### 39. ОШИБКА 401: заблокированный dave больше не может войти
+### 39. ОШИБКА 401: заблокированный dave — его access больше не принимается
 GET {{host}}/api/auth/me
-Authorization: Basic dave Secret123
+Authorization: Bearer {{daveAccess}}
+
+### 39a. ОШИБКА 401: заблокированный dave не может обновить пару
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{daveRefresh}}"}
+
+### 39b. ОШИБКА 401: заблокированный dave не может войти
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{"username": "dave", "password": "Secret123"}
 
 ### 40. Преподаватель: удалить попытку, экзамен и пользователя
 DELETE {{host}}/api/exam-attempts/{{attemptId}}
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ###
 DELETE {{host}}/api/exams/{{examId}}
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}
 
 ###
 DELETE {{host}}/api/users/{{daveId}}
-Authorization: Basic teacher Password1
-X-XSRF-TOKEN: {{csrf}}
+Authorization: Bearer {{teacherAccess}}

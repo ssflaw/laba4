@@ -47,3 +47,18 @@ CREATE TABLE task_solutions (
     awarded_score INT NOT NULL CHECK (awarded_score >= 0),
     UNIQUE (attempt_id, task_id)
 );
+
+-- Задание 5: одна строка = одна выданная пара access/refresh.
+CREATE TABLE user_sessions (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username             VARCHAR(100) NOT NULL
+                         REFERENCES users (username) ON DELETE CASCADE ON UPDATE CASCADE,
+    device_id            VARCHAR(255),
+    access_token         TEXT NOT NULL,
+    refresh_token        TEXT NOT NULL UNIQUE,
+    access_token_expiry  TIMESTAMPTZ NOT NULL,
+    refresh_token_expiry TIMESTAMPTZ NOT NULL,
+    status               VARCHAR(20) NOT NULL CHECK (status IN ('ACTIVE', 'USED', 'REVOKED'))
+);
+
+CREATE INDEX user_sessions_username_idx ON user_sessions (username);

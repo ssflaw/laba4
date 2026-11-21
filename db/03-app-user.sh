@@ -6,4 +6,6 @@ GRANT CONNECT ON DATABASE $POSTGRES_DB TO $DB_USER;
 GRANT USAGE ON SCHEMA public TO $DB_USER;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO $DB_USER;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO $DB_USER;
+-- Сессии приложение только читает, создаёт и меняет им статус — удалять их не нужно.
+REVOKE DELETE ON user_sessions FROM $DB_USER;
 SQL
